@@ -1,6 +1,4 @@
-# ============================================================
-# ROUTES PACKAGE - Flask blueprints
-# ============================================================
+# pyrefly: ignore[missing-import]
 from flask import Blueprint
 
 moisture_bp = Blueprint('moisture', __name__)
