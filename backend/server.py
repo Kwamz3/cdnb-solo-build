@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from flask import Flask
 from flask_cors import CORS
 
