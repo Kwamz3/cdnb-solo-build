@@ -1,6 +1,4 @@
-# ============================================================
-# MOISTURE ROUTES
-# ============================================================
+#pyrefly: ignore[missing-import]
 from flask import request, jsonify
 from routes import moisture_bp
 from services import save_moisture, get_latest_moisture as get_latest_moisture_data

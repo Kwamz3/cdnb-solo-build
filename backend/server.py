@@ -2,7 +2,7 @@
 from flask import Flask
 from flask_cors import CORS
 
-from db import init_db
+from config.db import init_db
 from routes import moisture_bp, pump_bp
 
 

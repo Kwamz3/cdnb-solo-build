@@ -1,7 +1,4 @@
-# ============================================================
-# SERVICES MODULE - business logic for moisture and pump
-# ============================================================
-from db import get_connection
+from config.db import get_connection
 
 
 def save_moisture(moisture):

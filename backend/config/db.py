@@ -1,6 +1,3 @@
-# ============================================================
-# DATABASE MODULE - connection and schema
-# ============================================================
 import sqlite3
 
 DB_PATH = 'irrigation.db'
