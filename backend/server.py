@@ -15,11 +15,11 @@ def create_app():
     CORS(app)  # Allows the React frontend (localhost:5173) to communicate with this backend
 
 
-@index_bp.get('/')
+@app.get('/')
 def root():
     return {'service': 'smart-irrigation-backend', 'status': 'ok'}, 200
 
-@health_bp.get('/health')
+@app.get('/health')
 def health_status():
     return {'status': 'healthy'}, 200
 
