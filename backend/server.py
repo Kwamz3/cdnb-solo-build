@@ -1,4 +1,8 @@
 # pyrefly: ignore [missing-import]
+from routes import health_bp
+from routes import index_bp
+
+# pyrefly: ignore [missing-import]
 from flask import Flask
 from flask_cors import CORS
 
@@ -9,6 +13,15 @@ from routes import moisture_bp, pump_bp
 def create_app():
     app = Flask(__name__)
     CORS(app)  # Allows the React frontend (localhost:5173) to communicate with this backend
+
+
+@index_bp.get('/')
+def root():
+    return {'service': 'smart-irrigation-backend', 'status': 'ok'}, 200
+
+@health_bp.get('/health')
+def health_status():
+    return {'status': 'healthy'}, 200
 
     app.register_blueprint(moisture_bp)
     app.register_blueprint(pump_bp)
