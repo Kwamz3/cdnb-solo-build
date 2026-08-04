@@ -1,8 +1,4 @@
 # pyrefly: ignore [missing-import]
-from routes import health_bp
-from routes import index_bp
-
-# pyrefly: ignore [missing-import]
 from flask import Flask
 from flask_cors import CORS
 
