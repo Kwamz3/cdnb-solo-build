@@ -30,7 +30,7 @@ function App() {
             }
           ]);
         }
-      } catch (error) {
+      } catch {
         // Backend not available - that's okay, we'll just show "No data"
         console.log('Waiting for backend connection...');
       }
