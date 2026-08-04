@@ -1,5 +1,5 @@
 # pyrefly: ignore [missing-import] 
-from flask import flask
+from flask import Flask
 from routes import health_bp, index_bp
 
 @index_bp.route('/', methods=['POST'])
