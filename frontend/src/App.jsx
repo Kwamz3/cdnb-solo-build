@@ -14,7 +14,7 @@ function App() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await fetch('http://localhost:5000/api/moisture/latest');
+        const response = await fetch('https://cdnb-render-build.onrender.com/api/moisture/latest');
         const data = await response.json();
         
         if (data && data.moisture !== undefined) {
@@ -44,7 +44,7 @@ function App() {
 
   const togglePump = async (action) => {
     try {
-      await fetch('http://localhost:5000/api/pump/control', {
+      await fetch('https://cdnb-render-build.onrender.com/api/pump/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action })
