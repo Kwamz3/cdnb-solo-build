@@ -2,13 +2,21 @@
 from flask import Flask
 from flask_cors import CORS
 
-from db import init_db
+from config.db import init_db
 from routes import moisture_bp, pump_bp
 
 
 def create_app():
     app = Flask(__name__)
     CORS(app)  # Allows the React frontend (localhost:5173) to communicate with this backend
+
+    @app.get('/')
+    def root():
+        return {'service': 'smart-irrigation-backend', 'status': 'ok'}, 200
+
+    @app.get('/health')
+    def health_status():
+        return {'status': 'healthy'}, 200
 
     app.register_blueprint(moisture_bp)
     app.register_blueprint(pump_bp)

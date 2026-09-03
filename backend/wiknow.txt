@@ -1,0 +1,120 @@
+API integration for simulation
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>   // only needed for https://
+
+#define MOISTURE_SENSOR_PIN 34
+#define RELAY_PIN 26
+
+const char* WIFI_SSID = "Wokwi-GUEST";
+const char* WIFI_PASS = "";
+const int   WIFI_CHANNEL = 6;          // speeds up Wokwi connection
+
+// Backend endpoints (Flask API on Render)
+const char* MOISTURE_URL = "https://cdnb-render-build.onrender.com/api/moisture";
+const char* PUMP_URL     = "https://cdnb-render-build.onrender.com/api/pump/control";
+const char* DEVICE_ID    = "irrigation-node-01";  // informational; backend ignores it today
+
+int moistureThreshold = 40;
+
+void connectWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS, WIFI_CHANNEL);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+    Serial.print(".");
+  }
+  Serial.print("\nConnected. IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+// POST a moisture reading to the backend.
+// Returns HTTP status code (negative = client-side error).
+int postReading(int raw, int percent) {
+  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+
+  WiFiClientSecure client;
+  client.setInsecure();              // skip cert check (fine for testing)
+
+  HTTPClient http;
+  http.setTimeout(15000);            // free Render tier can be slow to wake
+  if (!http.begin(client, MOISTURE_URL)) {
+    Serial.println("http.begin failed");
+    return -1000;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+
+  // This is the ONLY field the backend reads today.
+  char body[64];
+  snprintf(body, sizeof(body), "{\"moisture\":%d}", percent);
+
+  int code = http.POST((uint8_t*)body, strlen(body));
+  Serial.printf("POST %s -> %d\n", MOISTURE_URL, code);
+
+  if (code > 0) {
+    Serial.println("Response: " + http.getString());
+  } else {
+    Serial.printf("HTTP error: %s\n", http.errorToString(code).c_str());
+  }
+
+  http.end();
+  return code;
+}
+
+// POST the pump state so the dashboard shows ON/OFF correctly.
+// NOTE: this overwrites the pump_status of the LATEST reading row —
+// always call postReading() first, then this.
+void postPumpStatus(const char* action) {
+  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(15000);
+  if (!http.begin(client, PUMP_URL)) return;
+
+  http.addHeader("Content-Type", "application/json");
+
+  char body[32];
+  snprintf(body, sizeof(body), "{\"action\":\"%s\"}", action);
+
+  int code = http.POST((uint8_t*)body, strlen(body));
+  Serial.printf("POST %s -> %d\n", PUMP_URL, code);
+
+  http.end();
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);        // relay idle (active-LOW module)
+  analogReadResolution(12);             // 0..4095
+  connectWiFi();
+  Serial.println("Smart Irrigation Started");
+}
+
+void loop() {
+  int sensorValue = analogRead(MOISTURE_SENSOR_PIN);
+  int moisturePercent = constrain(map(sensorValue, 0, 4095, 0, 100), 0, 100);
+
+  Serial.printf("Raw: %d  Moisture: %d%%\n", sensorValue, moisturePercent);
+
+  bool pumpRan = false;
+  if (moisturePercent < moistureThreshold) {
+    Serial.println("Starting irrigation...");
+    digitalWrite(RELAY_PIN, LOW);
+    delay(2000);
+    digitalWrite(RELAY_PIN, HIGH);
+    pumpRan = true;
+    Serial.println("Irrigation complete");
+  }
+
+  postReading(sensorValue, moisturePercent);
+  if (pumpRan) postPumpStatus("ON");
+
+  delay(3000);   // ~1 sample every 3 s; raise to 30000+ for a real deployment
+}
