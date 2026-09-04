@@ -2,12 +2,14 @@
 # SMART IRRIGATION BACKEND - Python / Flask-SocketIO
 # ============================================================
 #pyrefly: ignore[missing-import]
+from requests import models
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
-#pyrefly: ignore[missing-import]
-import datetime, timezone, time
+import time
+import os
+from datetime import datetime, timezone
 
 from config.db import init_db, get_history_records
 from services import (
@@ -44,6 +46,10 @@ def root():
 @app.get('/health')
 def health_status():
     return {'status': 'healthy'}, 200
+
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 
 # ------------------------------------------------------------
