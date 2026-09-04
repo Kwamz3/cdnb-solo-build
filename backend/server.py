@@ -3,7 +3,8 @@
 # ============================================================
 #pyrefly: ignore[missing-import]
 from requests import models
-from Flask import Flask, request, jsonify
+#pyrefly:ignore[missing-import]
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
