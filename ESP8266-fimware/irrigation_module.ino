@@ -36,7 +36,7 @@ const bool RELAY_ACTIVE_LOW = false;  // true for common active-low relay boards
 
 // Timing
 const unsigned long readInterval   = 1000;   // sample every 1 s
-const unsigned long uploadInterval = 3000;  // report every 10 s
+const unsigned long uploadInterval = 1000;  // report every 1 s
 unsigned long lastReadTime   = 0;
 unsigned long lastUploadTime = 0;
 
