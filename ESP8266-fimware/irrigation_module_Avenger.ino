@@ -1,13 +1,10 @@
 /*
   ESP8266 Automatic Water Pump Controller + WiFi reporting
-  - Reads soil moisture, controls the pump relay (your existing logic)
+  - Reads soil moisture, controls the pump relay with immediate response
   - Reports readings to a backend over WiFi (HTTP POST, JSON)
   - Works with a local LAN server (HTTP) or a public server like Render (HTTPS)
-
-  Wiring (NodeMCU / Wemos D1 mini):
-    Soil moisture sensor AO -> A0
-    Relay IN               -> GPIO14 (D5)
-    VCC -> 3V3, GND -> GND
+  
+  OPTIMIZED FOR SPEED AND RELIABILITY
 */
 
 #include <ESP8266WiFi.h>
@@ -19,36 +16,47 @@ const char* WIFI_SSID     = "AV9NG6R";
 const char* WIFI_PASSWORD = "123456789100";
 
 // --- Backend target ---
-// Local server on your LAN:  USE_HTTPS = false, host = 192.168.1.100, port = 5000
-// Render (public URL):       USE_HTTPS = true,  host = cdnb-render-build.onrender.com, port = 443
 const bool  USE_HTTPS    = true;
-const char* BACKEND_HOST = "cdnb-render-build.onrender.com";  // bare hostname only, NO "https://"
-const int   BACKEND_PORT = 443;                      // 443 for HTTPS, 80 for HTTP
+const char* BACKEND_HOST = "cdnb-render-build.onrender.com";
+const int   BACKEND_PORT = 443;
 const char* BACKEND_PATH = "/api/readings";
 const char* DEVICE_ID    = "pump-01";
 
-// Sensor calibration (keep your values)
-#define DRY_VALUE   1024   // raw ADC value when sensor is in dry air
-#define WET_VALUE   530    // raw ADC value when sensor is fully wet
-int MOISTURE_THRESHOLD_PERCENT = 40;
+// Sensor calibration
+#define DRY_VALUE   1024
+#define WET_VALUE   530
+const int MOISTURE_THRESHOLD_PERCENT = 40;
 
-const bool RELAY_ACTIVE_LOW = false;  // true for common active-low relay boards
+const bool RELAY_ACTIVE_LOW = false;
 
-// Timing
-const unsigned long readInterval   = 1000;   // sample every 1 s
-const unsigned long uploadInterval = 5000;  // report every 1 s
-unsigned long lastReadTime   = 0;
-unsigned long lastUploadTime = 0;
+// Optimized timing - MUCH faster response
+const unsigned long readInterval   = 100;    // Read every 100ms for faster response
+const unsigned long uploadInterval = 2000;   // Report every 2s
 
 /* ================= PINS ================= */
-const int sensorPin = A0;   // analog input
-const int relayPin  = D6;   // GPIO14 = D5 on NodeMCU
+const int sensorPin = A0;
+const int relayPin  = D6;
 
 /* ================= STATE ================= */
 bool currentPumpState = false;
 bool lastPumpState    = false;
 int  lastRaw          = 0;
 int  lastMoisture     = 0;
+bool wifiConnected    = false;
+bool uploadInProgress = false;
+
+// Timing variables
+unsigned long lastReadTime = 0;
+unsigned long lastUploadTime = 0;
+
+// Pre-allocated buffers for speed
+char jsonBuffer[128];
+char urlBuffer[128];
+
+// Persistent HTTP client objects to avoid re-creation
+HTTPClient http;
+WiFiClientSecure secureClient;
+WiFiClient plainClient;
 
 void setPump(bool turnOn) {
   if (RELAY_ACTIVE_LOW) {
@@ -59,7 +67,10 @@ void setPump(bool turnOn) {
 }
 
 void connectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    return;
+  }
 
   Serial.print("Connecting to WiFi ");
   WiFi.mode(WIFI_STA);
@@ -68,150 +79,139 @@ void connectWiFi() {
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(500);
+    delay(100);
     Serial.print(".");
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
+  wifiConnected = (WiFi.status() == WL_CONNECTED);
+  if (wifiConnected) {
     Serial.println();
     Serial.print("Connected! IP: ");
     Serial.println(WiFi.localIP());
   } else {
     Serial.println();
-    Serial.println("WiFi connect FAILED (will retry on next upload)");
+    Serial.println("WiFi connect FAILED");
   }
 }
 
 void sendReading(int raw, int moisture, bool pumpOn) {
-  if (WiFi.status() != WL_CONNECTED) {
+  // Don't start new upload if previous is still in progress
+  if (uploadInProgress) return;
+  
+  // Check WiFi connection
+  if (!wifiConnected) {
     connectWiFi();
-    if (WiFi.status() != WL_CONNECTED) return; // skip this upload, retry later
+    if (!wifiConnected) return;
   }
 
-  // Build JSON manually (no extra library needed)
-  String payload = "{\"device\":\"" + String(DEVICE_ID) +
-                   "\",\"raw\":" + String(raw) +
-                   ",\"moisture\":" + String(moisture) +
-                   ",\"pump\":" + String(pumpOn ? "true" : "false") +
-                   "}";
+  // Build JSON quickly using sprintf (faster than String concatenation)
+  snprintf(jsonBuffer, sizeof(jsonBuffer), 
+    "{\"device\":\"%s\",\"raw\":%d,\"moisture\":%d,\"pump\":%s}",
+    DEVICE_ID, raw, moisture, pumpOn ? "true" : "false"
+  );
 
-  Serial.print("[mem] free heap: ");
-  Serial.println(ESP.getFreeHeap());
+  uploadInProgress = true;
+  int code = -1;
 
-  // -3 / -1 are often transient (server cold start, edge reset);
-  // retry once before giving up on this cycle.
-  for (int attempt = 1; attempt <= 2; attempt++) {
-    HTTPClient http;
-    bool began = false;
+  // Setup HTTP connection
+  bool began = false;
+  if (USE_HTTPS) {
+    secureClient.setInsecure();
+    began = http.begin(secureClient, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH, true);
+  } else {
+    began = http.begin(plainClient, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH);
+  }
 
-    if (USE_HTTPS) {
-      static WiFiClientSecure client;
-      client.setInsecure();  // skip cert check; pin the fingerprint in production
-      began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH, true);
-    } else {
-      static WiFiClient client;
-      began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH);
-    }
-
-    if (!began) {
-      Serial.println("[HTTP] begin failed");
-      return;
-    }
-
-    http.setTimeout(15000);  // tolerate Render cold starts (~30-50 s on free tier)
+  if (began) {
+    http.setTimeout(5000);  // Shorter timeout for faster response
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("Connection", "close");  // avoid keep-alive edge cases
-
-    int code = http.POST(payload);
+    http.addHeader("Connection", "close");
+    
+    code = http.POST(jsonBuffer);
+    
     if (code > 0) {
       String response = http.getString();
-      Serial.print("[HTTP] "); Serial.print(code);
-      Serial.print(" -> "); Serial.println(response);
-      http.end();
-
-      // -------------------------------------------------------
-      // Sync physical relay with backend pump decision.
-      // The backend evaluates: manual overrides from the dashboard
-      // Start/Stop buttons, Auto mode threshold, and rain-skip.
-      // If the backend says pumpStatus changed, reflect it immediately.
-      // -------------------------------------------------------
+      
+      // Parse response for pump commands
       if (response.indexOf("\"pumpStatus\":true") >= 0) {
         if (!currentPumpState) {
           setPump(true);
           currentPumpState = true;
-          Serial.println("[BACKEND] Pump commanded ON by dashboard/backend");
+          lastPumpState = true;
         }
       } else if (response.indexOf("\"pumpStatus\":false") >= 0) {
         if (currentPumpState) {
           setPump(false);
           currentPumpState = false;
-          Serial.println("[BACKEND] Pump commanded OFF by dashboard/backend");
+          lastPumpState = false;
         }
       }
-      return;  // success
     }
-
-    Serial.print("[HTTP] attempt "); Serial.print(attempt);
-    Serial.print(" failed: code "); Serial.print(code);
-    Serial.print(" ("); Serial.print(http.errorToString(code));
-    Serial.println(")");
     http.end();
-
-    if (attempt == 1) delay(2000);  // brief pause before the retry
   }
+
+  uploadInProgress = false;
 }
 
 void setup() {
   pinMode(relayPin, OUTPUT);
-  setPump(false);              // pump OFF at boot
+  setPump(false);
   currentPumpState = false;
-  lastPumpState    = false;
+  lastPumpState = false;
 
   Serial.begin(115200);
-  delay(1000);
+  delay(100);
 
   Serial.println("========================================");
-  Serial.println("ESP8266 Pump Controller - GPIO14 READY");
+  Serial.println("ESP8266 Pump Controller - OPTIMIZED");
   Serial.println("========================================");
 
+  // Initialize WiFi
   connectWiFi();
+  
+  // Initialize HTTP client once
+  http.setReuse(true);
 }
 
 void loop() {
   unsigned long now = millis();
 
-  // --- sample sensor & run irrigation logic (unchanged) ---
+  // --- READ SENSOR AND CONTROL PUMP (HIGH PRIORITY) ---
   if (now - lastReadTime >= readInterval) {
     lastReadTime = now;
 
+    // Read sensor
     int raw = analogRead(sensorPin);
     int moisture = map(raw, DRY_VALUE, WET_VALUE, 0, 100);
     moisture = constrain(moisture, 0, 100);
 
-    lastRaw      = raw;
+    lastRaw = raw;
     lastMoisture = moisture;
 
-    if (moisture < MOISTURE_THRESHOLD_PERCENT) {
-      setPump(true);
-      currentPumpState = true;
-    } else {
-      setPump(false);
-      currentPumpState = false;
-    }
-
-    Serial.print("Raw: "); Serial.print(raw);
-    Serial.print(" | Moisture: "); Serial.print(moisture);
-    Serial.print("% | Pump: "); Serial.println(currentPumpState ? "ON" : "OFF");
-
-    if (currentPumpState != lastPumpState) {
+    // IMMEDIATE PUMP CONTROL - no delays
+    bool shouldPumpOn = (moisture < MOISTURE_THRESHOLD_PERCENT);
+    
+    if (shouldPumpOn != currentPumpState) {
+      setPump(shouldPumpOn);
+      currentPumpState = shouldPumpOn;
+      
+      // Log state changes
+      Serial.print("Raw: "); Serial.print(raw);
+      Serial.print(" | Moisture: "); Serial.print(moisture);
+      Serial.print("% | Pump: "); Serial.println(currentPumpState ? "ON" : "OFF");
       Serial.println(currentPumpState ? ">>> PUMP ON <<<" : ">>> PUMP OFF <<<");
-      lastPumpState = currentPumpState;
+      
+      // Force immediate upload on state change
+      lastUploadTime = 0;
     }
   }
 
-  // --- report to backend (non-blocking, every uploadInterval) ---
-  if (now - lastUploadTime >= uploadInterval) {
+  // --- REPORT TO BACKEND (NON-BLOCKING) ---
+  if (!uploadInProgress && (now - lastUploadTime >= uploadInterval)) {
     lastUploadTime = now;
     sendReading(lastRaw, lastMoisture, currentPumpState);
   }
+
+  // Small yield to prevent watchdog issues
+  yield();
 }

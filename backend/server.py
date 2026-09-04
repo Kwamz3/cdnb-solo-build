@@ -135,26 +135,56 @@ def add_reading():
     Bridges hardware data into the main telemetry pipeline so the
     dashboard updates in real-time via WebSocket.
     """
-    data = request.get_json(force=True) or {}
+    try:
+        data = request.get_json(force=True) or {}
+        print(f"[/api/readings] Received: {data}")  # DEBUG
 
-    # The ESP8266 has no RTC, timestamp server-side
-    data["receivedAt"] = datetime.now(timezone.utc).isoformat()
-    readings.append(data)
-    print("[/api/readings]", data)
-
-    # --- Bridge into the main telemetry pipeline ---
-    # This makes the moisture value appear on the dashboard in real-time
-    moisture = data.get("moisture")
-    if moisture is not None:
-        updated_state = process_telemetry(
-            moisture=float(moisture),
-            temperature=float(data.get("temperature", system_state["temperature"])),
-            water_level=float(data.get("waterLevel", data.get("water_level", system_state["waterLevel"])))
-        )
-        # Broadcast to all connected React dashboards
-        socketio.emit('telemetryUpdate', updated_state)
-
-    return jsonify({"ok": True})
+        # The ESP8266 has no RTC, timestamp server-side
+        data["receivedAt"] = datetime.now(timezone.utc).isoformat()
+        readings.append(data)
+        
+        # --- Bridge into the main telemetry pipeline ---
+        # Extract moisture value - Arduino sends 'moisture' field
+        moisture = data.get("moisture")
+        
+        if moisture is not None:
+            print(f"[/api/readings] Processing moisture: {moisture}%")  # DEBUG
+            
+            # Convert to float and process
+            moisture_val = float(moisture)
+            
+            # Get pump status from Arduino if provided, else use current state
+            pump_from_arduino = data.get("pump")
+            
+            # Process telemetry - this updates system_state and saves to DB
+            updated_state = process_telemetry(
+                moisture=moisture_val,
+                temperature=float(data.get("temperature", system_state["temperature"])),
+                water_level=float(data.get("waterLevel", data.get("water_level", system_state["waterLevel"])))
+            )
+            
+            # If Arduino sent pump status, override the auto-decision (for manual mode)
+            if pump_from_arduino is not None and not system_state["autoMode"]:
+                updated_state["pumpStatus"] = bool(pump_from_arduino)
+                system_state["pumpStatus"] = bool(pump_from_arduino)
+            
+            # CRITICAL: Broadcast to all connected React dashboards
+            print(f"[/api/readings] Broadcasting update: moisture={updated_state['moisture']}%, pump={updated_state['pumpStatus']}")  # DEBUG
+            socketio.emit('telemetryUpdate', updated_state)
+            
+            return jsonify({
+                "status": "success",
+                "moisture": moisture_val,
+                "pumpStatus": updated_state["pumpStatus"],
+                "systemState": updated_state
+            }), 200
+        else:
+            print(f"[/api/readings] No moisture field in data: {data}")  # DEBUG
+            return jsonify({"error": "Missing moisture field", "received": data}), 400
+            
+    except Exception as e:
+        print(f"[/api/readings] Error: {e}")  # DEBUG
+        return jsonify({"error": str(e)}), 500
 
 
 @app.get("/api/readings")
