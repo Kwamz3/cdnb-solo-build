@@ -20,9 +20,9 @@ const char* WIFI_PASSWORD = "123456789100";
 
 // --- Backend target ---
 // Local server on your LAN:  USE_HTTPS = false, host = 192.168.1.100, port = 5000
-// Render (public URL):       USE_HTTPS = true,  host = your-app.onrender.com, port = 443
+// Render (public URL):       USE_HTTPS = true,  host = cdnb-render-build.onrender.com, port = 443
 const bool  USE_HTTPS    = true;
-const char* BACKEND_HOST = "https://cdnb-render-build.onrender.com";  // no "https://", no trailing "/"
+const char* BACKEND_HOST = "cdnb-render-build.onrender.com";  // bare hostname only, NO "https://"
 const int   BACKEND_PORT = 443;                      // 443 for HTTPS, 80 for HTTP
 const char* BACKEND_PATH = "/api/readings";
 const char* DEVICE_ID    = "pump-01";
@@ -124,9 +124,30 @@ void sendReading(int raw, int moisture, bool pumpOn) {
 
     int code = http.POST(payload);
     if (code > 0) {
+      String response = http.getString();
       Serial.print("[HTTP] "); Serial.print(code);
-      Serial.print(" -> "); Serial.println(http.getString());
+      Serial.print(" -> "); Serial.println(response);
       http.end();
+
+      // -------------------------------------------------------
+      // Sync physical relay with backend pump decision.
+      // The backend evaluates: manual overrides from the dashboard
+      // Start/Stop buttons, Auto mode threshold, and rain-skip.
+      // If the backend says pumpStatus changed, reflect it immediately.
+      // -------------------------------------------------------
+      if (response.indexOf("\"pumpStatus\":true") >= 0) {
+        if (!currentPumpState) {
+          setPump(true);
+          currentPumpState = true;
+          Serial.println("[BACKEND] Pump commanded ON by dashboard/backend");
+        }
+      } else if (response.indexOf("\"pumpStatus\":false") >= 0) {
+        if (currentPumpState) {
+          setPump(false);
+          currentPumpState = false;
+          Serial.println("[BACKEND] Pump commanded OFF by dashboard/backend");
+        }
+      }
       return;  // success
     }
 

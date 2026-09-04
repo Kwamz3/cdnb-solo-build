@@ -131,11 +131,29 @@ readings = []  # in-memory store; swap for a database in production
 
 @app.post("/api/readings")
 def add_reading():
-    data = request.get_json(force=True)
-    # The ESP8266 has no RTC, so let the backend timestamp each reading
+    """Endpoint for ESP8266 firmware (POST /api/readings).
+    Bridges hardware data into the main telemetry pipeline so the
+    dashboard updates in real-time via WebSocket.
+    """
+    data = request.get_json(force=True) or {}
+
+    # The ESP8266 has no RTC, timestamp server-side
     data["receivedAt"] = datetime.now(timezone.utc).isoformat()
     readings.append(data)
-    print(data)
+    print("[/api/readings]", data)
+
+    # --- Bridge into the main telemetry pipeline ---
+    # This makes the moisture value appear on the dashboard in real-time
+    moisture = data.get("moisture")
+    if moisture is not None:
+        updated_state = process_telemetry(
+            moisture=float(moisture),
+            temperature=float(data.get("temperature", system_state["temperature"])),
+            water_level=float(data.get("waterLevel", data.get("water_level", system_state["waterLevel"])))
+        )
+        # Broadcast to all connected React dashboards
+        socketio.emit('telemetryUpdate', updated_state)
+
     return jsonify({"ok": True})
 
 
@@ -215,9 +233,6 @@ app.register_blueprint(pump_bp)
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-    
     init_db()
     # Fetch initial weather forecast
     threading.Thread(target=fetch_weather_forecast, daemon=True).start()
@@ -227,4 +242,5 @@ if __name__ == '__main__':
     print(" Smart Irrigation Backend (Python / Socket.IO)    ")
     print(" Running on http://localhost:5000                 ")
     print("==================================================")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port, debug=True, allow_unsafe_werkzeug=True)
