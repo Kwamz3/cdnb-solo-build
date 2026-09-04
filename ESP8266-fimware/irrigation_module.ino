@@ -1,17 +1,17 @@
 /*
-  ESP8266 Automatic Water Pump Controller - OPTIMIZED
+  ESP8266 Automatic Water Pump Controller - FIXED
 */
 
 #include <Esp.h>
 
 const int sensorPin   = A0;   // Water sensor analog output -> A0
-const int relayPin    = D6;   // Moved to D5 (GPIO14) to avoid D4/D1 boot issues
+const int relayPin    = 14;   // GPIO14 (D5 on NodeMCU)
 
 #define DRY_VALUE   1024   
 #define WET_VALUE   530    
 
 int MOISTURE_THRESHOLD_PERCENT = 40;
-const bool RELAY_ACTIVE_LOW = false; 
+const bool RELAY_ACTIVE_LOW = false; // Set to true for standard active-low relay modules
 
 unsigned long lastReadTime = 0;
 const unsigned long readInterval = 1000; 
@@ -21,24 +21,13 @@ bool lastPumpState = false;
 
 void setPump(bool turnOn) {
   if (RELAY_ACTIVE_LOW) {
-    if (turnOn) {
-      digitalWrite(relayPin, LOW);  // Send 0V to turn ON active-low relay
-    } else {
-      digitalWrite(relayPin, HIGH); // Send 3.3V to turn OFF active-low relay
-    }
+    digitalWrite(relayPin, turnOn ? LOW : HIGH);
   } else {
-    if (turnOn) {
-      digitalWrite(relayPin, HIGH); // Send 3.3V to turn ON active-high relay
-    } else {
-      digitalWrite(relayPin, LOW);  // Send 0V to turn OFF active-high relay
-    }
+    digitalWrite(relayPin, turnOn ? HIGH : LOW);
   }
 }
 
-
 void setup() {
-  // CRITICAL FIX: Write HIGH to the internal output latch BEFORE setting pinMode.
-  // This minimizes active-low relay clicking during initial microsecond boot stages.
   if (RELAY_ACTIVE_LOW) {
     digitalWrite(relayPin, HIGH); 
   } else {
@@ -47,14 +36,14 @@ void setup() {
   pinMode(relayPin, OUTPUT);
   
   Serial.begin(115200);
-  delay(1000); // 1 second is enough now that pins are stable
+  delay(1000);
   
   setPump(false);
   currentPumpState = false;
   lastPumpState = false;
   
   Serial.println("========================================");
-  Serial.println("ESP8266 Pump Controller - D5 STABLE");
+  Serial.println("ESP8266 Pump Controller - GPIO14 READY");
   Serial.println("========================================");
 }
 
@@ -68,6 +57,7 @@ void loop() {
     int moisturePercent = map(sensorValue, DRY_VALUE, WET_VALUE, 0, 100);
     moisturePercent = constrain(moisturePercent, 0, 100);
 
+    // Irrigation logic: Pump turns ON when moisture drops below threshold (Dry)
     if (moisturePercent < MOISTURE_THRESHOLD_PERCENT) {
       setPump(true);
       currentPumpState = true;

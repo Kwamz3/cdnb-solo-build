@@ -1,3 +1,6 @@
 flask
 flask-cors
+flask-socketio
+simple-websocket
+requests
 gunicorn
