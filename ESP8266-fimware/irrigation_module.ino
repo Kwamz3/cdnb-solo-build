@@ -2,6 +2,7 @@
   ESP8266 Automatic Water Pump Controller + WiFi reporting
   - Reads soil moisture, controls the pump relay (your existing logic)
   - Reports readings to a backend over WiFi (HTTP POST, JSON)
+  - Works with a local LAN server (HTTP) or a public server like Render (HTTPS)
 
   Wiring (NodeMCU / Wemos D1 mini):
     Soil moisture sensor AO -> A0
@@ -11,14 +12,18 @@
 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 /* ================= CONFIG ================= */
 const char* WIFI_SSID     = "A55";
 const char* WIFI_PASSWORD = "123456789100";
 
-// Point these at your backend (LAN IP, or a public hostname)
-const char* BACKEND_HOST = "192.168.1.100";
-const int   BACKEND_PORT = 5000;
+// --- Backend target ---
+// Local server on your LAN:  USE_HTTPS = false, host = 192.168.1.100, port = 5000
+// Render (public URL):       USE_HTTPS = true,  host = your-app.onrender.com, port = 443
+const bool  USE_HTTPS    = true;
+const char* BACKEND_HOST = "https://cdnb-render-build.onrender.com";  // no "https://", no trailing "/"
+const int   BACKEND_PORT = 443;                      // 443 for HTTPS, 80 for HTTP
 const char* BACKEND_PATH = "/api/readings";
 const char* DEVICE_ID    = "pump-01";
 
@@ -83,16 +88,6 @@ void sendReading(int raw, int moisture, bool pumpOn) {
     if (WiFi.status() != WL_CONNECTED) return; // skip this upload, retry later
   }
 
-  WiFiClient client;
-  HTTPClient http;
-
-  if (!http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH)) {
-    Serial.println("[HTTP] begin failed");
-    return;
-  }
-
-  http.addHeader("Content-Type", "application/json");
-
   // Build JSON manually (no extra library needed)
   String payload = "{\"device\":\"" + String(DEVICE_ID) +
                    "\",\"raw\":" + String(raw) +
@@ -100,15 +95,49 @@ void sendReading(int raw, int moisture, bool pumpOn) {
                    ",\"pump\":" + String(pumpOn ? "true" : "false") +
                    "}";
 
-  int code = http.POST(payload);
-  if (code > 0) {
-    Serial.print("[HTTP] "); Serial.print(code);
-    Serial.print(" -> "); Serial.println(http.getString());
-  } else {
-    Serial.print("[HTTP] POST failed: ");
-    Serial.println(http.errorToString(code));
+  Serial.print("[mem] free heap: ");
+  Serial.println(ESP.getFreeHeap());
+
+  // -3 / -1 are often transient (server cold start, edge reset);
+  // retry once before giving up on this cycle.
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    HTTPClient http;
+    bool began = false;
+
+    if (USE_HTTPS) {
+      static WiFiClientSecure client;
+      client.setInsecure();  // skip cert check; pin the fingerprint in production
+      began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH, true);
+    } else {
+      static WiFiClient client;
+      began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH);
+    }
+
+    if (!began) {
+      Serial.println("[HTTP] begin failed");
+      return;
+    }
+
+    http.setTimeout(15000);  // tolerate Render cold starts (~30-50 s on free tier)
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");  // avoid keep-alive edge cases
+
+    int code = http.POST(payload);
+    if (code > 0) {
+      Serial.print("[HTTP] "); Serial.print(code);
+      Serial.print(" -> "); Serial.println(http.getString());
+      http.end();
+      return;  // success
+    }
+
+    Serial.print("[HTTP] attempt "); Serial.print(attempt);
+    Serial.print(" failed: code "); Serial.print(code);
+    Serial.print(" ("); Serial.print(http.errorToString(code));
+    Serial.println(")");
+    http.end();
+
+    if (attempt == 1) delay(2000);  // brief pause before the retry
   }
-  http.end();
 }
 
 void setup() {
