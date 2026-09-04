@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
-import time
+import datetime, timezone, time
 
 from config.db import init_db, get_history_records
 from services import (
@@ -120,7 +120,29 @@ def get_history():
 
 
 # ------------------------------------------------------------
-# 4. Weather Forecast Integration (Rain Skip)
+# 4. Irrigation System readings
+# ------------------------------------------------------------
+readings = []  # in-memory store; swap for a database in production
+
+
+@app.post("/api/readings")
+def add_reading():
+    data = request.get_json(force=True)
+    # The ESP8266 has no RTC, so let the backend timestamp each reading
+    data["receivedAt"] = datetime.now(timezone.utc).isoformat()
+    readings.append(data)
+    print(data)
+    return jsonify({"ok": True})
+
+
+@app.get("/api/readings")
+def list_readings():
+    # Return the most recent 100 readings as a quick sanity check
+    return jsonify(readings[-100:])
+
+
+# ------------------------------------------------------------
+# 5. Weather Forecast Integration (Rain Skip)
 # ------------------------------------------------------------
 @app.get('/api/weather')
 def get_weather():
@@ -135,7 +157,7 @@ def get_weather():
 
 
 # ------------------------------------------------------------
-# 5. Alert & Webhook Management
+# 6. Alert & Webhook Management
 # ------------------------------------------------------------
 @app.post('/api/alerts/test')
 def test_alert():
