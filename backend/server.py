@@ -9,10 +9,6 @@ import threading
 import time
 import os
 from datetime import datetime, timezone
-import logging
-
-# Enable logging to see what's happening
-logging.basicConfig(level=logging.DEBUG)
 
 from config.db import init_db, get_history_records
 from services import (
@@ -84,9 +80,9 @@ def receive_telemetry():
             water_level=water_level
         )
 
-        # Force emit with broadcast=True
-        socketio.emit('telemetryUpdate', updated_state, broadcast=True)
-        print(f"[TELEMETRY] Broadcast sent: moisture={updated_state['moisture']}%, pump={updated_state['pumpStatus']}")
+        # FIXED: Remove broadcast=True, just emit
+        socketio.emit('telemetryUpdate', updated_state)
+        print(f"[TELEMETRY] Emitted: moisture={updated_state['moisture']}%, pump={updated_state['pumpStatus']}")
 
         return jsonify({
             "status": "success",
@@ -118,7 +114,9 @@ def set_controls():
             webhook_url=webhook_url
         )
 
-        socketio.emit('telemetryUpdate', updated_state, broadcast=True)
+        # FIXED: Remove broadcast=True
+        socketio.emit('telemetryUpdate', updated_state)
+        print(f"[CONTROLS] Emitted: moisture={updated_state['moisture']}%, pump={updated_state['pumpStatus']}")
 
         return jsonify({
             "status": "updated",
@@ -126,6 +124,8 @@ def set_controls():
         }), 200
     except Exception as e:
         print(f"[CONTROLS] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # ------------------------------------------------------------
@@ -142,7 +142,7 @@ def get_history():
     return jsonify(records), 200
 
 # ------------------------------------------------------------
-# 4. Arduino Readings Endpoint - FIXED
+# 4. Arduino Readings Endpoint
 # ------------------------------------------------------------
 readings = []
 
@@ -151,22 +151,22 @@ def add_reading():
     """Endpoint for ESP8266 firmware (POST /api/readings)."""
     try:
         data = request.get_json(force=True) or {}
-        print(f"[READINGS] Raw data from Arduino: {data}")
+        print(f"[READINGS] 📥 Raw data from Arduino: {data}")
         
         # Add timestamp
         data["receivedAt"] = datetime.now(timezone.utc).isoformat()
         readings.append(data)
         
-        # Extract moisture - CRITICAL: Arduino sends 'moisture' field
+        # Extract moisture - Arduino sends 'moisture' field
         moisture = data.get("moisture")
         
         if moisture is None:
-            print(f"[READINGS] ERROR: No moisture field in {data}")
+            print(f"[READINGS] ❌ ERROR: No moisture field in {data}")
             return jsonify({"error": "Missing moisture field", "received": data}), 400
         
         # Convert to float
         moisture_val = float(moisture)
-        print(f"[READINGS] Moisture: {moisture_val}%")
+        print(f"[READINGS] 🌱 Moisture: {moisture_val}%")
         
         # Get other values
         pump_from_arduino = data.get("pump", False)
@@ -185,9 +185,9 @@ def add_reading():
             updated_state["pumpStatus"] = bool(pump_from_arduino)
             system_state["pumpStatus"] = bool(pump_from_arduino)
         
-        # CRITICAL: Broadcast to frontend
-        print(f"[READINGS] Broadcasting: moisture={updated_state['moisture']}%, pump={updated_state['pumpStatus']}")
-        socketio.emit('telemetryUpdate', updated_state, broadcast=True)
+        # FIXED: Remove broadcast=True, just emit
+        print(f"[READINGS] 📤 Emitting: moisture={updated_state['moisture']}%, pump={updated_state['pumpStatus']}")
+        socketio.emit('telemetryUpdate', updated_state)
         
         return jsonify({
             "status": "success",
@@ -197,7 +197,7 @@ def add_reading():
         }), 200
         
     except Exception as e:
-        print(f"[READINGS] ERROR: {e}")
+        print(f"[READINGS] ❌ ERROR: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -237,17 +237,17 @@ def test_alert():
 # ------------------------------------------------------------
 @socketio.on('connect')
 def handle_connect():
-    print('[Socket.IO] Client connected')
+    print('[Socket.IO] ✅ Client connected')
     # Send current state immediately
     emit('telemetryUpdate', system_state)
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('[Socket.IO] Client disconnected')
+    print('[Socket.IO] ❌ Client disconnected')
 
 @socketio.on('requestTelemetry')
 def handle_request_telemetry():
-    print('[Socket.IO] Client requested telemetry')
+    print('[Socket.IO] 📡 Client requested telemetry')
     emit('telemetryUpdate', system_state)
 
 # ------------------------------------------------------------
@@ -259,7 +259,7 @@ def background_monitor():
             fetch_weather_forecast()
             alerts = check_system_alerts()
             if alerts:
-                socketio.emit('telemetryUpdate', system_state, broadcast=True)
+                socketio.emit('telemetryUpdate', system_state)
         except Exception as e:
             print(f"[Background] Error: {e}")
         time.sleep(300)
