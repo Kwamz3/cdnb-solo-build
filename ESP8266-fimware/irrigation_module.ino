@@ -17,7 +17,7 @@
     Relay IN               -> GPIO14 (D5)
     VCC -> 3V3, GND -> GND
 
-  Libraries: ArduinoJson v6 (Library Manager -> "ArduinoJson by Benoit Blanchon")
+  Libraries: ArduinoJson v6 or v7 (Library Manager -> "ArduinoJson by Benoit Blanchon")
 */
 
 #include <ESP8266WiFi.h>
@@ -42,23 +42,13 @@ const char* DEVICE_ID    = "pump-01";
 // Sensor calibration (keep your values)
 #define DRY_VALUE   1024   // raw ADC value when sensor is in dry air
 #define WET_VALUE   530    // raw ADC value when sensor is fully wet
-// NOTE: now a variable, not const: the server can change it via /api/controls
 int MOISTURE_THRESHOLD_PERCENT = 40;
-
-// Server-driven settings (defaults = standalone behaviour until first poll)
-bool autoMode       = true;   // false  -> obey the web override
-bool manualOverride = false;  // from   state.override.active
-bool overrideOn     = false;  // from   state.override.on
-bool rainExpected   = false;  // from   state.rainExpected (skip watering)
-int  waterLevel     = 100;    // from   state.waterLevel (%)
-const int  WATER_SAFETY_LEVEL = 10;   // don't run the pump below this
-int  lastAppliedSeq = 0;      // last commandSeq we applied (ACKed in telemetry)
 
 const bool RELAY_ACTIVE_LOW = false;  // true for common active-low relay boards
 
 // Timing
-const unsigned long readInterval     = 1000;   // sample every 1 s
-const unsigned long uploadInterval   = 10000;  // poll + report every 10 s
+const unsigned long readInterval   = 1000;   // sample every 1 s
+const unsigned long uploadInterval = 10000;  // report every 10 s
 unsigned long lastReadTime   = 0;
 unsigned long lastUploadTime = 0;
 
@@ -72,7 +62,6 @@ bool lastPumpState    = false;
 int  lastRaw          = 0;
 int  lastMoisture     = 0;
 
-/* ================= RELAY ================= */
 void setPump(bool turnOn) {
   if (RELAY_ACTIVE_LOW) {
     digitalWrite(relayPin, turnOn ? LOW : HIGH);
@@ -81,7 +70,6 @@ void setPump(bool turnOn) {
   }
 }
 
-/* ================= WIFI ================= */
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
@@ -102,161 +90,10 @@ void connectWiFi() {
     Serial.println(WiFi.localIP());
   } else {
     Serial.println();
-    Serial.println("WiFi connect FAILED (will retry on next cycle)");
+    Serial.println("WiFi connect FAILED (will retry on next upload)");
   }
 }
 
-/* ================= COMMAND CHANNEL (new) ================= */
-
-// GET a path and return the HTTP status code; body goes into `response`.
-// Returns a negative ESP8266HTTPClient error code on transport failure.
-int httpGet(const String& path, String& response) {
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWiFi();
-    if (WiFi.status() != WL_CONNECTED) return -1;
-  }
-
-  HTTPClient http;
-  bool began = false;
-
-  if (USE_HTTPS) {
-    static WiFiClientSecure client;   // static: reuse the TLS session
-    client.setInsecure();             // skip cert check; pin the fingerprint in production
-    began = http.begin(client, String(BACKEND_HOST), BACKEND_PORT, path, true);
-  } else {
-    static WiFiClient client;
-    began = http.begin(client, String(BACKEND_HOST), BACKEND_PORT, path);
-  }
-
-  if (!began) {
-    Serial.println("[HTTP] GET begin failed");
-    return -2;
-  }
-
-  http.setTimeout(10000);             // GET is small; Render should be warm from polling
-  http.addHeader("Connection", "close");
-
-  int code = http.GET();
-  if (code > 0) {
-    response = http.getString();
-  } else {
-    Serial.print("[HTTP] GET failed: code "); Serial.print(code);
-    Serial.print(" ("); Serial.print(http.errorToString(code)); Serial.println(")");
-  }
-  http.end();
-  return code;
-}
-
-// Poll GET /api/state, parse only the fields we care about (JSON filter
-// keeps the RAM cost tiny), and apply them to the globals.
-// Returns true if anything changed.
-bool fetchAndApplyState() {
-  String response;
-  int code = httpGet(String(STATE_PATH), response);
-  if (code != 200) {
-    Serial.print("[state] HTTP "); Serial.println(code);
-    return false;                       // keep last known settings; retry next cycle
-  }
-
-  // Filter: only deserialize the fields the device needs
-  StaticJsonDocument<256> filter;
-  filter["threshold"]     = true;
-  filter["autoMode"]      = true;
-  filter["override"]["active"] = true;
-  filter["override"]["on"]     = true;
-  filter["rainExpected"]  = true;
-  filter["waterLevel"]    = true;
-  filter["commandSeq"]    = true;
-
-  StaticJsonDocument<384> doc;
-  DeserializationError err =
-      deserializeJson(doc, response, DeserializationOption::Filter(filter));
-  if (err) {
-    Serial.print("[state] JSON parse error: ");
-    Serial.println(err.c_str());
-    return false;
-  }
-
-  bool changed = false;
-
-  if (!doc["threshold"].isNull()) {
-    int t = doc["threshold"].as<int>();
-    if (t >= 10 && t <= 90 && t != MOISTURE_THRESHOLD_PERCENT) {
-      MOISTURE_THRESHOLD_PERCENT = t;
-      changed = true;
-    }
-  }
-  if (!doc["autoMode"].isNull()) {
-    bool a = doc["autoMode"].as<bool>();
-    if (a != autoMode) { autoMode = a; changed = true; }
-  }
-  if (!doc["override"]["active"].isNull()) {
-    bool a = doc["override"]["active"].as<bool>();
-    if (a != manualOverride) { manualOverride = a; changed = true; }
-  }
-  if (!doc["override"]["on"].isNull()) {
-    bool o = doc["override"]["on"].as<bool>();
-    if (o != overrideOn) { overrideOn = o; changed = true; }
-  }
-  if (!doc["rainExpected"].isNull()) {
-    bool r = doc["rainExpected"].as<bool>();
-    if (r != rainExpected) { rainExpected = r; changed = true; }
-  }
-  if (!doc["waterLevel"].isNull()) {
-    int w = doc["waterLevel"].as<int>();
-    if (w != waterLevel) { waterLevel = w; changed = true; }
-  }
-  if (!doc["commandSeq"].isNull()) {
-    int s = doc["commandSeq"].as<int>();
-    if (s != lastAppliedSeq) {
-      lastAppliedSeq = s;               // ACKed in the next telemetry POST
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    Serial.println("[state] applied:");
-    Serial.print("  threshold="); Serial.print(MOISTURE_THRESHOLD_PERCENT);
-    Serial.print(" autoMode="); Serial.print(autoMode ? "AUTO" : "MANUAL");
-    Serial.print(" override="); Serial.print(manualOverride ? (overrideOn ? "ON" : "OFF") : "-");
-    Serial.print(" rain="); Serial.print(rainExpected ? "YES" : "no");
-    Serial.print(" water="); Serial.print(waterLevel);
-    Serial.print(" seq="); Serial.println(lastAppliedSeq);
-  }
-  return changed;
-}
-
-// Decide the pump target from server commands (or fall back to the local
-// threshold logic when the server has not sent a manual override).
-void updatePump(int moisture) {
-  bool target;
-  const char* reason;
-
-  if (manualOverride) {
-    target = overrideOn;                                   // button wins
-    reason = overrideOn ? "manual ON" : "manual OFF";
-  } else if (rainExpected) {
-    target = false;                                        // rain skip
-    reason = "rain expected";
-  } else if (waterLevel < WATER_SAFETY_LEVEL) {
-    target = false;                                        // protect pump
-    reason = "reservoir low";
-  } else {
-    target = (moisture < MOISTURE_THRESHOLD_PERCENT);      // default auto logic
-    reason = target ? "soil dry" : "soil wet";
-  }
-
-  setPump(target);
-  currentPumpState = target;
-
-  if (target != lastPumpState) {
-    Serial.print(currentPumpState ? ">>> PUMP ON (" : ">>> PUMP OFF (");
-    Serial.print(reason); Serial.println(") <<<");
-    lastPumpState = currentPumpState;
-  }
-}
-
-/* ================= TELEMETRY (unchanged shape + seq ACK) ================= */
 void sendReading(int raw, int moisture, bool pumpOn) {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -267,50 +104,36 @@ void sendReading(int raw, int moisture, bool pumpOn) {
                    "\",\"raw\":" + String(raw) +
                    ",\"moisture\":" + String(moisture) +
                    ",\"pump\":" + String(pumpOn ? "true" : "false") +
-                   ",\"seq\":" + String(lastAppliedSeq) +   // command ACK
                    "}";
 
-  for (int attempt = 1; attempt <= 2; attempt++) {
-    HTTPClient http;
-    bool began = false;
+  HTTPClient http;
+  bool began;
 
-    if (USE_HTTPS) {
-      static WiFiClientSecure client;
-      client.setInsecure();
-      began = http.begin(client, String(BACKEND_HOST), BACKEND_PORT, String(READINGS_PATH), true);
-    } else {
-      static WiFiClient client;
-      began = http.begin(client, String(BACKEND_HOST), BACKEND_PORT, String(READINGS_PATH));
-    }
-
-    if (!began) {
-      Serial.println("[HTTP] begin failed");
-      return;
-    }
-
-    http.setTimeout(15000);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Connection", "close");
-
-    int code = http.POST(payload);
-    if (code > 0) {
-      Serial.print("[HTTP] "); Serial.print(code);
-      Serial.print(" -> "); Serial.println(http.getString());
-      http.end();
-      return;
-    }
-
-    Serial.print("[HTTP] attempt "); Serial.print(attempt);
-    Serial.print(" failed: code "); Serial.print(code);
-    Serial.print(" ("); Serial.print(http.errorToString(code));
-    Serial.println(")");
-    http.end();
-
-    if (attempt == 1) delay(2000);
+  if (USE_HTTPS) {
+    static WiFiClientSecure client;
+    client.setInsecure();  // skip cert check; pin the fingerprint in production
+    began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH, true);
+  } else {
+    static WiFiClient client;
+    began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH);
   }
+
+  if (!began) return;
+
+  http.setTimeout(15000);  // tolerate Render cold starts (~30-50 s on free tier)
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Connection", "close");
+
+  int code = http.POST(payload);
+  if (code > 0) {
+    Serial.print("[HTTP] ");
+    Serial.print(code);
+    Serial.print(" -> ");
+    Serial.println(http.getString());   // → [HTTP] 200 -> {"ok":true}
+  }
+  http.end();
 }
 
-/* ================= SETUP ================= */
 void setup() {
   pinMode(relayPin, OUTPUT);
   setPump(false);              // pump OFF at boot
@@ -322,17 +145,15 @@ void setup() {
 
   Serial.println("========================================");
   Serial.println("ESP8266 Pump Controller - GPIO14 READY");
-  Serial.println("(cloud control: polling /api/state)");
   Serial.println("========================================");
 
   connectWiFi();
 }
 
-/* ================= LOOP ================= */
 void loop() {
   unsigned long now = millis();
 
-  // --- sample sensor (every 1 s) ---
+  // --- sample sensor & run irrigation logic (unchanged) ---
   if (now - lastReadTime >= readInterval) {
     lastReadTime = now;
 
@@ -343,18 +164,27 @@ void loop() {
     lastRaw      = raw;
     lastMoisture = moisture;
 
-    updatePump(moisture);   // <-- now takes server commands into account
+    if (moisture < MOISTURE_THRESHOLD_PERCENT) {
+      setPump(true);
+      currentPumpState = true;
+    } else {
+      setPump(false);
+      currentPumpState = false;
+    }
 
     Serial.print("Raw: "); Serial.print(raw);
     Serial.print(" | Moisture: "); Serial.print(moisture);
     Serial.print("% | Pump: "); Serial.println(currentPumpState ? "ON" : "OFF");
+
+    if (currentPumpState != lastPumpState) {
+      Serial.println(currentPumpState ? ">>> PUMP ON <<<" : ">>> PUMP OFF <<<");
+      lastPumpState = currentPumpState;
+    }
   }
 
-  // --- command poll + telemetry report (every 10 s) ---
+  // --- report to backend (non-blocking, every uploadInterval) ---
   if (now - lastUploadTime >= uploadInterval) {
     lastUploadTime = now;
-    fetchAndApplyState();                       // 1) pull commands from dashboard
-    updatePump(lastMoisture);                   //    re-apply immediately if changed
-    sendReading(lastRaw, lastMoisture, currentPumpState);   // 2) report + ACK
+    sendReading(lastRaw, lastMoisture, currentPumpState);
   }
 }
