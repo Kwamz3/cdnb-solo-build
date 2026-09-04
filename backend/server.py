@@ -23,7 +23,9 @@ from services import (
 from routes import moisture_bp, pump_bp
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'smart-irrigation-secret-key-2026'
+port = int(os.environ.get("PORT", 5000))
+app.run(host="0.0.0.0", port=port)
+# app.config['SECRET_KEY'] = 'smart-irrigation-secret-key-2026'
 
 # Allow cross-origin requests from React dashboard (Vite / localhost / Netlify)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -46,10 +48,6 @@ def root():
 @app.get('/health')
 def health_status():
     return {'status': 'healthy'}, 200
-
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
 
 
 # ------------------------------------------------------------
