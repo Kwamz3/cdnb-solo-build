@@ -15,8 +15,8 @@
 #include <WiFiClientSecure.h>
 
 /* ================= CONFIG ================= */
-const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID     = "A55";
+const char* WIFI_PASSWORD = "123456789100";
 
 // --- Backend target ---
 // Local server on your LAN:  USE_HTTPS = false, host = 192.168.1.100, port = 5000
@@ -36,7 +36,7 @@ const bool RELAY_ACTIVE_LOW = false;  // true for common active-low relay boards
 
 // Timing
 const unsigned long readInterval   = 1000;   // sample every 1 s
-const unsigned long uploadInterval = 10000;  // report every 10 s
+const unsigned long uploadInterval = 3000;  // report every 10 s
 unsigned long lastReadTime   = 0;
 unsigned long lastUploadTime = 0;
 
