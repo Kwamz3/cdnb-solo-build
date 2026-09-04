@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Smart Irrigation System favicon -->
+
+  <!-- App-tile background -->
+  <rect width="64" height="64" rx="14" fill="#0F9B77"/>
+
+  <!-- Water droplet -->
+  <path d="M32 10 C32 10 48 28 48 38 A16 16 0 1 1 16 38 C16 28 32 10 32 10 Z" fill="#FFFFFF"/>
+
+  <!-- Leaf inside the droplet -->
+  <path d="M42 26 C44 38 36 48 26 50 C24 40 32 31 42 26 Z" fill="#16A34A"/>
+  <!-- Leaf vein -->
+  <path d="M42 26 C38 34 32 42 26 50" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Signal arcs (smart / connected) -->
+  <path d="M47 12 A7 7 0 0 1 54 19" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" opacity="0.95"/>
+  <circle cx="45.5" cy="20.5" r="2.2" fill="#FFFFFF"/>
+</svg>

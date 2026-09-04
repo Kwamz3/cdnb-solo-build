@@ -248,7 +248,7 @@ export default function Dashboard() {
                     : 'bg-amber-400'
               }`}></span>
               {!isConnected 
-                ? 'waiting for connection with the server' 
+                ? 'Waiting for connection with the server' 
                 : data.sensorOnline 
                   ? 'Hardware Sensor Online' 
                   : 'Hardware Sensor Offline'}
