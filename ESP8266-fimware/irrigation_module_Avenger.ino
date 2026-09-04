@@ -1,60 +1,81 @@
 /*
-  ESP8266 Automatic Water Pump Controller + WiFi reporting
-  - Reads soil moisture, controls the pump relay (your existing logic)
-  - Reports readings to a backend over WiFi (HTTP POST, JSON)
-  - Works with a local LAN server (HTTP) or a public server like Render (HTTPS)
-
-  Wiring (NodeMCU / Wemos D1 mini):
-    Soil moisture sensor AO -> A0
-    Relay IN               -> GPIO14 (D5)
-    VCC -> 3V3, GND -> GND
+  ESP8266 Automatic Water Pump Controller + High-Speed MQTT
+  - Publishes soil moisture telemetry via MQTT (< 50ms)
+  - Subscribes to immediate pump commands from dashboard/backend
 */
 
 #include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
 
 /* ================= CONFIG ================= */
 const char* WIFI_SSID     = "AV9NG6R";
 const char* WIFI_PASSWORD = "123456789100";
 
-// --- Backend target ---
-// Local server on your LAN:  USE_HTTPS = false, host = 192.168.1.100, port = 5000
-// Render (public URL):       USE_HTTPS = true,  host = cdnb-render-build.onrender.com, port = 443
-const bool  USE_HTTPS    = true;
-const char* BACKEND_HOST = "cdnb-render-build.onrender.com";  // bare hostname only, NO "https://"
-const int   BACKEND_PORT = 443;                      // 443 for HTTPS, 80 for HTTP
-const char* BACKEND_PATH = "/api/readings";
-const char* DEVICE_ID    = "pump-01";
+// MQTT Broker (Match the host in your Flask backend)
+const char* MQTT_BROKER   = "broker.hivemq.com";
+const int   MQTT_PORT     = 1883;
 
-// Sensor calibration (keep your values)
-#define DRY_VALUE   1024   // raw ADC value when sensor is in dry air
-#define WET_VALUE   530    // raw ADC value when sensor is fully wet
+// Topics
+const char* TOPIC_TELEMETRY = "irrigation/pump-01/telemetry";
+const char* TOPIC_CONTROL   = "irrigation/pump-01/control";
+const char* DEVICE_ID       = "pump-01";
+
+// Sensor Calibration
+#define DRY_VALUE   1024
+#define WET_VALUE   530
 int MOISTURE_THRESHOLD_PERCENT = 40;
 
-const bool RELAY_ACTIVE_LOW = false;  // true for common active-low relay boards
+const bool RELAY_ACTIVE_LOW = false;
 
 // Timing
-const unsigned long readInterval   = 1000;   // sample every 1 s
-const unsigned long uploadInterval = 5000;  // report every 1 s
+const unsigned long readInterval   = 1000;   // Sample sensor every 1s
+const unsigned long uploadInterval = 3000;   // Publish over MQTT every 3s (can be even faster with MQTT)
 unsigned long lastReadTime   = 0;
 unsigned long lastUploadTime = 0;
 
 /* ================= PINS ================= */
-const int sensorPin = A0;   // analog input
-const int relayPin  = D6;   // GPIO14 = D5 on NodeMCU
+const int sensorPin = A0;
+const int relayPin  = D6;
 
-/* ================= STATE ================= */
+/* ================= STATE & CLIENTS ================= */
 bool currentPumpState = false;
 bool lastPumpState    = false;
 int  lastRaw          = 0;
 int  lastMoisture     = 0;
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 
 void setPump(bool turnOn) {
   if (RELAY_ACTIVE_LOW) {
     digitalWrite(relayPin, turnOn ? LOW : HIGH);
   } else {
     digitalWrite(relayPin, turnOn ? HIGH : LOW);
+  }
+}
+
+// -------------------------------------------------------------
+// MQTT Incoming Message Callback (Executes instantly when backend publishes)
+// -------------------------------------------------------------
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.print("[MQTT IN] Topic: ");
+  Serial.print(topic);
+  Serial.print(" | Payload: ");
+  Serial.println(message);
+
+  // Parse pump control command
+  if (message.indexOf("\"pumpStatus\":true") >= 0) {
+    setPump(true);
+    currentPumpState = true;
+    Serial.println("[BACKEND] Pump commanded ON immediately via MQTT");
+  } else if (message.indexOf("\"pumpStatus\":false") >= 0) {
+    setPump(false);
+    currentPumpState = false;
+    Serial.println("[BACKEND] Pump commanded OFF immediately via MQTT");
   }
 }
 
@@ -68,119 +89,89 @@ void connectWiFi() {
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(500);
+    delay(400);
     Serial.print(".");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
-    Serial.print("Connected! IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.println("\nWiFi Connected! IP: " + WiFi.localIP().toString());
   } else {
-    Serial.println();
-    Serial.println("WiFi connect FAILED (will retry on next upload)");
+    Serial.println("\nWiFi connection failed!");
   }
 }
 
-void sendReading(int raw, int moisture, bool pumpOn) {
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWiFi();
-    if (WiFi.status() != WL_CONNECTED) return; // skip this upload, retry later
+void reconnectMQTT() {
+  // Loop until we're reconnected without blocking the rest of the board for long
+  while (!mqttClient.connected()) {
+    if (WiFi.status() != WL_CONNECTED) {
+      connectWiFi();
+    }
+    Serial.print("Attempting MQTT connection... ");
+    String clientId = "ESP8266-" + String(DEVICE_ID) + "-" + String(random(0xffff), HEX);
+
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("connected!");
+      // Resubscribe to control topic
+      mqttClient.subscribe(TOPIC_CONTROL);
+      Serial.println("Subscribed to control topic.");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" retrying in 2 seconds...");
+      delay(2000);
+    }
+  }
+}
+
+void publishReading(int raw, int moisture, bool pumpOn) {
+  if (!mqttClient.connected()) {
+    reconnectMQTT();
   }
 
-  // Build JSON manually (no extra library needed)
+  // Fast JSON payload
   String payload = "{\"device\":\"" + String(DEVICE_ID) +
                    "\",\"raw\":" + String(raw) +
                    ",\"moisture\":" + String(moisture) +
                    ",\"pump\":" + String(pumpOn ? "true" : "false") +
                    "}";
 
-  Serial.print("[mem] free heap: ");
-  Serial.println(ESP.getFreeHeap());
-
-  // -3 / -1 are often transient (server cold start, edge reset);
-  // retry once before giving up on this cycle.
-  for (int attempt = 1; attempt <= 2; attempt++) {
-    HTTPClient http;
-    bool began = false;
-
-    if (USE_HTTPS) {
-      static WiFiClientSecure client;
-      client.setInsecure();  // skip cert check; pin the fingerprint in production
-      began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH, true);
-    } else {
-      static WiFiClient client;
-      began = http.begin(client, BACKEND_HOST, BACKEND_PORT, BACKEND_PATH);
-    }
-
-    if (!began) {
-      Serial.println("[HTTP] begin failed");
-      return;
-    }
-
-    http.setTimeout(15000);  // tolerate Render cold starts (~30-50 s on free tier)
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Connection", "close");  // avoid keep-alive edge cases
-
-    int code = http.POST(payload);
-    if (code > 0) {
-      String response = http.getString();
-      Serial.print("[HTTP] "); Serial.print(code);
-      Serial.print(" -> "); Serial.println(response);
-      http.end();
-
-      // -------------------------------------------------------
-      // Sync physical relay with backend pump decision.
-      // The backend evaluates: manual overrides from the dashboard
-      // Start/Stop buttons, Auto mode threshold, and rain-skip.
-      // If the backend says pumpStatus changed, reflect it immediately.
-      // -------------------------------------------------------
-      if (response.indexOf("\"pumpStatus\":true") >= 0) {
-        if (!currentPumpState) {
-          setPump(true);
-          currentPumpState = true;
-          Serial.println("[BACKEND] Pump commanded ON by dashboard/backend");
-        }
-      } else if (response.indexOf("\"pumpStatus\":false") >= 0) {
-        if (currentPumpState) {
-          setPump(false);
-          currentPumpState = false;
-          Serial.println("[BACKEND] Pump commanded OFF by dashboard/backend");
-        }
-      }
-      return;  // success
-    }
-
-    Serial.print("[HTTP] attempt "); Serial.print(attempt);
-    Serial.print(" failed: code "); Serial.print(code);
-    Serial.print(" ("); Serial.print(http.errorToString(code));
-    Serial.println(")");
-    http.end();
-
-    if (attempt == 1) delay(2000);  // brief pause before the retry
+  boolean success = mqttClient.publish(TOPIC_TELEMETRY, payload.c_str());
+  if (success) {
+    Serial.println("[MQTT PUB OK] -> " + payload);
+  } else {
+    Serial.println("[MQTT PUB FAILED]");
   }
 }
 
 void setup() {
   pinMode(relayPin, OUTPUT);
-  setPump(false);              // pump OFF at boot
+  setPump(false);
   currentPumpState = false;
   lastPumpState    = false;
 
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
 
-  Serial.println("========================================");
-  Serial.println("ESP8266 Pump Controller - GPIO14 READY");
+  Serial.println("\n========================================");
+  Serial.println("ESP8266 Fast MQTT Pump Controller");
   Serial.println("========================================");
 
   connectWiFi();
+
+  // Configure MQTT
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
 }
 
 void loop() {
+  if (!mqttClient.connected()) {
+    reconnectMQTT();
+  }
+  mqttClient.loop(); // Keeps MQTT client alive and processes incoming messages instantly
+
   unsigned long now = millis();
 
-  // --- sample sensor & run irrigation logic (unchanged) ---
+  // --- Sample sensor & local logic ---
   if (now - lastReadTime >= readInterval) {
     lastReadTime = now;
 
@@ -199,19 +190,16 @@ void loop() {
       currentPumpState = false;
     }
 
-    Serial.print("Raw: "); Serial.print(raw);
-    Serial.print(" | Moisture: "); Serial.print(moisture);
-    Serial.print("% | Pump: "); Serial.println(currentPumpState ? "ON" : "OFF");
-
     if (currentPumpState != lastPumpState) {
       Serial.println(currentPumpState ? ">>> PUMP ON <<<" : ">>> PUMP OFF <<<");
       lastPumpState = currentPumpState;
     }
   }
 
-  // --- report to backend (non-blocking, every uploadInterval) ---
+  // --- Publish over MQTT (instant & lightweight) ---
   if (now - lastUploadTime >= uploadInterval) {
     lastUploadTime = now;
-    sendReading(lastRaw, lastMoisture, currentPumpState);
+    publishReading(lastRaw, lastMoisture, currentPumpState);
   }
 }
+

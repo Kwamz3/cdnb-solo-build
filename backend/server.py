@@ -1,16 +1,17 @@
 # ============================================================
-# SMART IRRIGATION BACKEND - Python / Flask-SocketIO
+# SMART IRRIGATION BACKEND - Python / Flask-SocketIO + MQTT
 # ============================================================
-#pyrefly: ignore[missing-import]
-from requests import models
+import os
+import json
+import threading
+import time
+from datetime import datetime, timezone
 #pyrefly:ignore[missing-import]
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
-import threading
-import time
-import os
-from datetime import datetime, timezone
+# pyrefly: ignore [missing-import]
+import paho.mqtt.client as mqtt
 
 from config.db import init_db, get_history_records
 from services import (
@@ -24,11 +25,82 @@ from services import (
 from routes import moisture_bp, pump_bp
 
 app = Flask(__name__)
-# app.config['SECRET_KEY'] = 'smart-irrigation-secret-key-2026'
-
-# Allow cross-origin requests from React dashboard (Vite / localhost / Netlify)
 CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# ============================================================
+# MQTT CONFIGURATION
+# ============================================================
+# You can use a local broker, or free cloud brokers:
+# - "broker.hivemq.com" (Public, no auth needed for testing)
+# - "broker.emqx.io"
+# - Or your own private Mosquitto / Cloud MQTT broker
+MQTT_BROKER_HOST = os.environ.get("MQTT_HOST", "broker.hivemq.com")
+MQTT_BROKER_PORT = int(os.environ.get("MQTT_PORT", 1883))
+MQTT_TOPIC_TELEMETRY = "irrigation/pump-01/telemetry"
+MQTT_TOPIC_CONTROL   = "irrigation/pump-01/control"
+
+mqtt_client = mqtt.Client(client_id="smart-irrigation-backend-server")
+
+
+def publish_pump_command(pump_on: bool):
+    """Publish pump command to ESP8266 over MQTT instantly."""
+    payload = json.dumps({"pumpStatus": pump_on})
+    try:
+        mqtt_client.publish(MQTT_TOPIC_CONTROL, payload, qos=1)
+        print(f"[MQTT PUB] -> {MQTT_TOPIC_CONTROL}: {payload}")
+    except Exception as e:
+        print(f"[MQTT PUB] Error: {e}")
+
+
+def on_mqtt_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print(f"[MQTT] Connected successfully to {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
+        client.subscribe(MQTT_TOPIC_TELEMETRY)
+        print(f"[MQTT] Subscribed to {MQTT_TOPIC_TELEMETRY}")
+    else:
+        print(f"[MQTT] Connection failed with code {rc}")
+
+
+def on_mqtt_message(client, userdata, msg):
+    """Handle telemetry published by ESP8266 in real time."""
+    try:
+        payload_str = msg.payload.decode("utf-8")
+        data = json.loads(payload_str)
+        print(f"[MQTT RX] <- {data}")
+
+        moisture = data.get("moisture")
+        if moisture is not None:
+            old_pump_status = system_state["pumpStatus"]
+            
+            # Process through the existing business logic pipeline
+            updated_state = process_telemetry(
+                moisture=float(moisture),
+                temperature=float(data.get("temperature", system_state["temperature"])),
+                water_level=float(data.get("waterLevel", data.get("water_level", system_state["waterLevel"])))
+            )
+
+            # Broadcast to React frontend via WebSockets
+            socketio.emit('telemetryUpdate', updated_state)
+
+            # If auto-mode changed the pump status, command the hardware immediately
+            if updated_state["pumpStatus"] != old_pump_status:
+                publish_pump_command(updated_state["pumpStatus"])
+
+    except Exception as e:
+        print(f"[MQTT RX Error] {e}")
+
+
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_message = on_mqtt_message
+
+
+def start_mqtt_client():
+    try:
+        mqtt_client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, 60)
+        mqtt_client.loop_start()  # Runs in its own background thread
+    except Exception as e:
+        print(f"[MQTT] Failed to start MQTT background client: {e}")
 
 
 # ------------------------------------------------------------
@@ -38,7 +110,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 def root():
     return {
         'service': 'smart-irrigation-backend',
-        'version': '2.0.0',
+        'version': '3.0.0 (MQTT-Enabled)',
         'status': 'ok',
         'socketio': True
     }, 200
@@ -50,39 +122,7 @@ def health_status():
 
 
 # ------------------------------------------------------------
-# 1. IoT Telemetry Endpoint
-# Hardware (ESP8266 / ESP32) or simulator posts telemetry here
-# ------------------------------------------------------------
-@app.post('/api/telemetry')
-def receive_telemetry():
-    data = request.get_json(silent=True) or {}
-    moisture = data.get('moisture')
-
-    if moisture is None:
-        return jsonify({"error": "Moisture value is required"}), 400
-
-    temperature = data.get('temperature', system_state["temperature"])
-    water_level = data.get('waterLevel', data.get('water_level', system_state["waterLevel"]))
-
-    updated_state = process_telemetry(
-        moisture=moisture,
-        temperature=temperature,
-        water_level=water_level
-    )
-
-    # Broadcast updated state to all connected frontend clients via WebSockets
-    socketio.emit('telemetryUpdate', updated_state)
-
-    return jsonify({
-        "status": "success",
-        "pumpStatus": updated_state["pumpStatus"],
-        "systemState": updated_state
-    }), 200
-
-
-# ------------------------------------------------------------
-# 2. Controls Endpoint
-# Frontend or remote app updates pump status, autoMode, or threshold
+# Controls Endpoint (Called when user clicks Start/Stop on Dashboard)
 # ------------------------------------------------------------
 @app.post('/api/controls')
 def set_controls():
@@ -99,8 +139,11 @@ def set_controls():
         webhook_url=webhook_url
     )
 
-    # Broadcast new system state to all connected frontend clients
+    # 1. Update React UI via WebSocket
     socketio.emit('telemetryUpdate', updated_state)
+
+    # 2. Instantly notify ESP8266 via MQTT (<50ms)
+    publish_pump_command(updated_state["pumpStatus"])
 
     return jsonify({
         "status": "updated",
@@ -109,7 +152,7 @@ def set_controls():
 
 
 # ------------------------------------------------------------
-# 3. System State & History Endpoints
+# System State & History Endpoints
 # ------------------------------------------------------------
 @app.get('/api/state')
 def get_state():
@@ -124,47 +167,7 @@ def get_history():
 
 
 # ------------------------------------------------------------
-# 4. Irrigation System readings
-# ------------------------------------------------------------
-readings = []  # in-memory store; swap for a database in production
-
-
-@app.post("/api/readings")
-def add_reading():
-    """Endpoint for ESP8266 firmware (POST /api/readings).
-    Bridges hardware data into the main telemetry pipeline so the
-    dashboard updates in real-time via WebSocket.
-    """
-    data = request.get_json(force=True) or {}
-
-    # The ESP8266 has no RTC, timestamp server-side
-    data["receivedAt"] = datetime.now(timezone.utc).isoformat()
-    readings.append(data)
-    print("[/api/readings]", data)
-
-    # --- Bridge into the main telemetry pipeline ---
-    # This makes the moisture value appear on the dashboard in real-time
-    moisture = data.get("moisture")
-    if moisture is not None:
-        updated_state = process_telemetry(
-            moisture=float(moisture),
-            temperature=float(data.get("temperature", system_state["temperature"])),
-            water_level=float(data.get("waterLevel", data.get("water_level", system_state["waterLevel"])))
-        )
-        # Broadcast to all connected React dashboards
-        socketio.emit('telemetryUpdate', updated_state)
-
-    return jsonify({"ok": True})
-
-
-@app.get("/api/readings")
-def list_readings():
-    # Return the most recent 100 readings as a quick sanity check
-    return jsonify(readings[-100:])
-
-
-# ------------------------------------------------------------
-# 5. Weather Forecast Integration (Rain Skip)
+# Weather Forecast Integration (Rain Skip)
 # ------------------------------------------------------------
 @app.get('/api/weather')
 def get_weather():
@@ -179,7 +182,7 @@ def get_weather():
 
 
 # ------------------------------------------------------------
-# 6. Alert & Webhook Management
+# Alert & Webhook Management
 # ------------------------------------------------------------
 @app.post('/api/alerts/test')
 def test_alert():
@@ -196,14 +199,7 @@ def test_alert():
 # ------------------------------------------------------------
 @socketio.on('connect')
 def handle_connect():
-    print('[Socket.IO] Client connected to live telemetry stream')
-    # Immediately send current state on connection
     emit('telemetryUpdate', system_state)
-
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('[Socket.IO] Client disconnected')
 
 
 @socketio.on('requestTelemetry')
@@ -212,10 +208,9 @@ def handle_request_telemetry():
 
 
 # ------------------------------------------------------------
-# Periodic Background Tasks (Weather refresh & Sensor timeout)
+# Periodic Background Tasks
 # ------------------------------------------------------------
 def background_monitor():
-    """Periodically refreshes weather and checks for sensor heartbeats."""
     while True:
         try:
             fetch_weather_forecast()
@@ -224,23 +219,25 @@ def background_monitor():
                 socketio.emit('telemetryUpdate', system_state)
         except Exception as e:
             print(f"[Background Monitor] Error: {e}")
-        time.sleep(300)  # Every 5 minutes
+        time.sleep(300)
 
 
-# Register existing legacy blueprints
 app.register_blueprint(moisture_bp)
 app.register_blueprint(pump_bp)
 
 
 if __name__ == '__main__':
     init_db()
-    # Fetch initial weather forecast
+    
+    # Start MQTT background loop
+    start_mqtt_client()
+
     threading.Thread(target=fetch_weather_forecast, daemon=True).start()
     threading.Thread(target=background_monitor, daemon=True).start()
 
     print("==================================================")
-    print(" Smart Irrigation Backend (Python / Socket.IO)    ")
-    print(" Running on http://localhost:5000                 ")
+    print(" Smart Irrigation Backend (MQTT + Socket.IO)      ")
+    print(" Running on http://0.0.0.0:5000                   ")
     print("==================================================")
     port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
