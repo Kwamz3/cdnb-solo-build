@@ -1,42 +1,30 @@
 /*
-  ESP8266 Automatic Water Pump Controller + WiFi reporting + CLOUD CONTROL
-  ---------------------------------------------------------------
-  - Reads soil moisture, controls the pump relay (existing logic)
-  - Reports readings to the backend (POST /api/readings, JSON)
-  - PULLS commands from the backend (GET /api/state) so the web
-    dashboard's buttons can actually control the pump.
-
-  WHY PULLING? The ESP8266 is behind your home router's NAT; the
-  server (Render) can never open a connection TO the device. So the
-  device polls the server every uploadInterval and applies the
-  "desired state" it finds. The button -> server -> device -> telemetry
-  loop is the only direction that works.
+  ESP8266 Automatic Water Pump Controller + WiFi reporting
+  - Reads soil moisture, controls the pump relay (your existing logic)
+  - Reports readings to a backend over WiFi (HTTP POST, JSON)
+  - Works with a local LAN server (HTTP) or a public server like Render (HTTPS)
 
   Wiring (NodeMCU / Wemos D1 mini):
     Soil moisture sensor AO -> A0
     Relay IN               -> GPIO14 (D5)
     VCC -> 3V3, GND -> GND
-
-  Libraries: ArduinoJson v6 or v7 (Library Manager -> "ArduinoJson by Benoit Blanchon")
 */
 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <ArduinoJson.h>
 
 /* ================= CONFIG ================= */
-const char* WIFI_SSID     = "A55";
-const char* WIFI_PASSWORD = "123456789100";
+const char* WIFI_SSID     = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // --- Backend target ---
 // Local server on your LAN:  USE_HTTPS = false, host = 192.168.1.100, port = 5000
-// Render (public URL):       USE_HTTPS = true,  host = your-app.onrender.com, port = 443
+// Render (public URL):       USE_HTTPS = true,  host = cdnb-render-build.onrender.com, port = 443
 const bool  USE_HTTPS    = true;
-const char* BACKEND_HOST = "cdnb-render-build.onrender.com";  // no "https://", no trailing "/"
+const char* BACKEND_HOST = "cdnb-render-build.onrender.com";  // NO "https://", NO trailing "/"
 const int   BACKEND_PORT = 443;                      // 443 for HTTPS, 80 for HTTP
-const char* READINGS_PATH = "/api/readings";
-const char* STATE_PATH    = "/api/state?device=pump-01";   // command channel
+const char* BACKEND_PATH = "/api/readings";
 const char* DEVICE_ID    = "pump-01";
 
 // Sensor calibration (keep your values)
