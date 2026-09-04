@@ -15,7 +15,7 @@
 #include <WiFiClientSecure.h>
 
 /* ================= CONFIG ================= */
-const char* WIFI_SSID     = "A55";
+const char* WIFI_SSID     = "AV9NG6R";
 const char* WIFI_PASSWORD = "123456789100";
 
 // --- Backend target ---
