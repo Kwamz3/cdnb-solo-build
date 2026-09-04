@@ -24,8 +24,6 @@ from services import (
 from routes import moisture_bp, pump_bp
 
 app = Flask(__name__)
-port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port)
 # app.config['SECRET_KEY'] = 'smart-irrigation-secret-key-2026'
 
 # Allow cross-origin requests from React dashboard (Vite / localhost / Netlify)
@@ -217,6 +215,9 @@ app.register_blueprint(pump_bp)
 
 
 if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+    
     init_db()
     # Fetch initial weather forecast
     threading.Thread(target=fetch_weather_forecast, daemon=True).start()
